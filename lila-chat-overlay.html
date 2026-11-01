@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Lila · Twitch chat overlay</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; }
+    body { --glass: rgba(20, 18, 30, .48); --edge: rgba(255,255,255,.14); }
+    #chat { position: absolute; left: 2.2%; bottom: 3.2%; width: min(34%, 540px); height: 29%; display:flex; flex-direction:column; justify-content:flex-end; gap: clamp(5px, .75vh, 11px); overflow:hidden; padding: 3.6% 1.2% 0; mask-image: linear-gradient(to top, #000 0%, #000 56%, rgba(0,0,0,.82) 75%, transparent 100%); -webkit-mask-image: linear-gradient(to top, #000 0%, #000 56%, rgba(0,0,0,.82) 75%, transparent 100%); }
+    .msg { flex: 0 0 auto; width: fit-content; max-width: 100%; padding: clamp(7px, .75vw, 12px) clamp(10px, 1vw, 16px); border: 1px solid var(--edge); border-radius: 16px 16px 16px 5px; background: var(--glass); box-shadow: 0 5px 18px rgba(0,0,0,.16), inset 0 1px rgba(255,255,255,.06); color:#fff; font-size: clamp(13px, 1.15vw, 19px); line-height:1.35; overflow-wrap:anywhere; backdrop-filter: blur(14px) saturate(125%); -webkit-backdrop-filter: blur(14px) saturate(125%); animation: pop .22s ease-out both; text-shadow: 0 1px 2px rgba(0,0,0,.4); }
+    .head { display:flex; align-items:center; gap:.32em; margin-bottom:.12em; }
+    .name { font-weight:750; }
+    .badge { display:inline-grid; place-items:center; min-width:1.22em; height:1.22em; border-radius:4px; background:rgba(255,255,255,.13); font-size:.78em; line-height:1; color:#fff; }
+    .badge[data-kind="moderator"] { background:#168a4a; }
+    .badge[data-kind="vip"] { background:#b5489b; }
+    .badge[data-kind="broadcaster"] { background:#8b293d; }
+    .badge[data-kind="subscriber"], .badge[data-kind="founder"] { background:#5b4bb7; }
+    .badge[data-kind="partner"] { background:#7041bd; }
+    .body { white-space:pre-wrap; }
+    .emote { height:1.65em; width:auto; vertical-align:middle; object-fit:contain; margin:0 .04em; }
+    #status { position:absolute; left:2.5%; bottom:1%; color:rgba(255,255,255,.55); font:11px/1.2 ui-sans-serif,system-ui,sans-serif; opacity:0; transition:opacity .25s; text-shadow:0 1px 3px #000; }
+    #status.show { opacity:1; }
+    @keyframes pop { from { opacity:0; transform:translateY(7px) scale(.985) } to { opacity:1; transform:translateY(0) scale(1) } }
+    @media (max-width:700px) { #chat { width:35%; } .msg { font-size:clamp(12px, 2.4vw, 17px); padding:6px 9px; } }
+    @media (prefers-reduced-motion:reduce) { .msg { animation:none; } }
+  </style>
+</head>
+<body>
+  <main id="chat" aria-live="polite" aria-label="Twitch chat"></main>
+  <div id="status" role="status"></div>
+  <script>
+  (() => {
+    const params = new URLSearchParams(location.search);
+    const channel = (params.get('channel') || 'lila').replace(/^#/, '').trim().toLowerCase();
+    const chat = document.querySelector('#chat'), status = document.querySelector('#status');
+    const maxMessages = Math.max(3, Math.min(30, Number(params.get('messages')) || 14));
+    let socket, retryTimer, statusTimer, retry = 0;
+    const decode = s => s.replace(/\\s/g,' ').replace(/\\:/g,';').replace(/\\r/g,'\r').replace(/\\n/g,'\n').replace(/\\\\/g,'\\');
+    function showStatus(text) { status.textContent = text; status.classList.add('show'); clearTimeout(statusTimer); statusTimer = setTimeout(() => status.classList.remove('show'), 5000); }
+    function parseLine(line) {
+      let tags = {};
+      if (line.startsWith('@')) { const i=line.indexOf(' '); if(i<0)return; for(const part of line.slice(1,i).split(';')) { const [k,...v]=part.split('='); tags[k]=decode(v.join('=')); } line=line.slice(i+1); }
+      const match = line.match(/^:([^! ]+)!.*? PRIVMSG #[^ ]+ :(.*)$/);
+      if (!match) return;
+      render(match[1], match[2], tags);
+    }
+    function render(login, text, tags) {
+      const row=document.createElement('article'); row.className='msg';
+      const head=document.createElement('div'); head.className='head';
+      const badges=(tags.badges||'').split(',').filter(Boolean);
+      for (const entry of badges) {
+        const [kind,version]=entry.split('/'); const b=document.createElement('span'); b.className='badge'; b.dataset.kind=kind;
+        b.title=`${kind} (${version})`; b.textContent=({broadcaster:'★',moderator:'◆',vip:'♦',subscriber:'✦',founder:'✦',partner:'✓',premium:'✧',staff:'✪',admin:'✪',global_mod:'◆',bits:'●',turbo:'ϟ'})[kind] || '✦'; head.append(b);
+      }
+      const name=document.createElement('span'); name.className='name'; name.textContent=tags['display-name'] || login;
+      if (/^#[0-9a-f]{6}$/i.test(tags.color||'')) name.style.color=tags.color;
+      head.append(name); row.append(head);
+      const body=document.createElement('div'); body.className='body';
+      const ranges=[];
+      for(const group of (tags.emotes||'').split('/')) { const colon=group.indexOf(':'); if(colon<1)continue; const id=group.slice(0,colon); for(const span of group.slice(colon+1).split(',')) { const [a,b]=span.split('-').map(Number); if(Number.isInteger(a)&&Number.isInteger(b))ranges.push({a,b,id}); } }
+      ranges.sort((a,b)=>a.a-b.a); let cursor=0;
+      for(const e of ranges) { if(e.a<cursor||e.b>=text.length)continue; body.append(document.createTextNode(text.slice(cursor,e.a))); const img=document.createElement('img'); img.className='emote'; img.alt=text.slice(e.a,e.b+1); img.src=`https://static-cdn.jtvnw.net/emoticons/v2/${encodeURIComponent(e.id)}/default/dark/2.0`; img.loading='lazy'; body.append(img); cursor=e.b+1; }
+      body.append(document.createTextNode(text.slice(cursor))); row.append(body); chat.append(row);
+      while(chat.children.length>maxMessages) chat.firstElementChild.remove();
+    }
+    function connect() {
+      clearTimeout(retryTimer); showStatus(`Csatlakozás: ${channel}`);
+      socket=new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+      socket.onopen=()=>{ retry=0; socket.send('CAP REQ :twitch.tv/tags twitch.tv/commands'); socket.send('PASS SCHMOOPIIE'); socket.send(`NICK justinfan${Math.floor(Math.random()*900000+100000)}`); socket.send(`JOIN #${channel}`); showStatus(`Twitch chat: ${channel}`); };
+      socket.onmessage=e=>{ for(const line of String(e.data).split('\r\n')) { if(!line)continue; if(line.startsWith('PING ')) socket.send('PONG '+line.slice(5)); else parseLine(line); } };
+      socket.onerror=()=>{ try{socket.close()}catch{} };
+      socket.onclose=()=>{ showStatus('Kapcsolat megszakadt · újracsatlakozás…'); retry=Math.min(retry+1,6); retryTimer=setTimeout(connect,Math.min(15000,1000*2**retry)); };
+    }
+    if(!/^[a-z0-9_]{1,25}$/.test(channel)) { showStatus('Hibás csatornanév az URL-ben'); return; }
+    connect();
+  })();
+  </script>
+</body>
+</html>
